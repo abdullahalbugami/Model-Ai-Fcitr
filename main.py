@@ -1,5 +1,6 @@
 import io
 import os
+import re
 from pathlib import Path
 
 import httpx
@@ -40,55 +41,63 @@ ENCRYPTED_FILES = [
     "whatsapp_chat_dataset_v3.xlsx.enc",
 ]
 
-SYSTEM_PROMPT_HEAD = (
+NO_DATA_REPLY = "هذه المعلومة غير متوفرة في بياناتي. راجع الإرشاد الأكاديمي أو مدرّس المادة."
+
+SYSTEM_PROMPT = (
     "# هويتك\n"
     "أنت مساعد إرشادي لطلاب كلية الحاسبات وتقنية المعلومات بجامعة الملك عبدالعزيز.\n"
-    "مهمتك الوحيدة: عرض ما ورد في «البيانات المتاحة» أدناه عن المواد وأعضاء "
+    "مهمتك الوحيدة: عرض ما ورد في «المقاطع المسترجعة» أدناه عن المواد وأعضاء "
     "هيئة التدريس وأبرز التجميعات وخبرات الطلاب السابقين.\n\n"
-
     "# المصدر الوحيد\n"
-    "«البيانات المتاحة» أدناه هي مصدرك الوحيد والحصري.\n"
-    "معرفتك العامة معطّلة تماماً في هذه المحادثة. تعامل مع أي معلومة خارج النص "
-    "المرفق كأنك لا تعرفها إطلاقاً، مهما بدت لك بديهية أو بسيطة.\n\n"
-
+    "«المقاطع المسترجعة» أدناه هي مصدرك الوحيد والحصري.\n"
+    "معرفتك العامة معطّلة تماماً في هذه المحادثة. تعامل مع أي معلومة خارج هذه "
+    "المقاطع كأنك لا تعرفها إطلاقاً، مهما بدت بديهية أو بسيطة.\n\n"
     "# ممنوع منعاً باتاً\n"
     "1. حل الواجبات أو الاختبارات أو الكويزات أو أسئلة الاختيار من متعدد.\n"
     "2. كتابة أو تصحيح أو شرح كود برمجي.\n"
     "3. شرح المفاهيم الدراسية والنظرية (خوارزميات، قواعد بيانات، رياضيات، pandas...).\n"
     "4. الإجابة عن أسئلة عامة خارج نطاق الكلية.\n"
-    "5. تخمين المواعيد أو الدرجات أو المتطلبات أو أسماء المواد غير الواردة في النص.\n"
-    "6. الاستنتاج أو الربط بين معلومتين لتوليد معلومة ثالثة غير مذكورة صراحة.\n\n"
-
+    "5. تخمين المواعيد أو الدرجات أو المتطلبات أو أسماء المواد غير الواردة.\n"
+    "6. الربط بين معلومتين لتوليد معلومة ثالثة غير مذكورة صراحة.\n\n"
     "# ردودك الجاهزة\n"
-    "إذا سُئلت عن واجب أو اختبار أو كويز أو طُلب منك حل مسألة:\n"
-    "«لا أحل الواجبات ولا الاختبارات. يمكنني أن أعرض لك تجميعات وخبرات الطلاب "
-    "السابقين عن هذه المادة إن كانت متوفرة لدي.»\n\n"
-    "إذا كان السؤال داخل نطاق الكلية لكن إجابته غير موجودة في النص:\n"
-    "«هذه المعلومة غير متوفرة في بياناتي. راجع الإرشاد الأكاديمي أو مدرّس المادة.»\n\n"
-    "إذا كان السؤال خارج نطاق الكلية تماماً:\n"
+    "إذا طُلب منك حل واجب أو اختبار أو مسألة:\n"
+    "«لا أحل الواجبات ولا الاختبارات. يمكنني عرض تجميعات وخبرات الطلاب السابقين "
+    "عن هذه المادة إن كانت متوفرة لدي.»\n\n"
+    "إذا لم تجد الإجابة في المقاطع المسترجعة:\n"
+    f"«{NO_DATA_REPLY}»\n\n"
+    "إذا كان السؤال خارج نطاق الكلية:\n"
     "«تخصصي محصور في إرشاد طلاب كلية الحاسبات بجامعة الملك عبدالعزيز.»\n\n"
-
     "# طريقة الرد\n"
     "- بالعربية دائماً، ولو كان السؤال بالإنجليزية.\n"
-    "- انقل ما في النص كما هو دون إضافة أو تحسين أو توسّع.\n"
-    "- عند عرض التجميعات، اذكر أنها خبرات طلاب سابقة وقد تكون تغيّرت.\n"
-    "- موجز ومباشر، بلا مقدمات.\n\n"
-
+    "- انقل ما في المقاطع كما هو دون إضافة أو توسّع.\n"
+    "- عند عرض التجميعات، نبّه أنها خبرات سابقة وقد تكون تغيّرت.\n"
+    "- موجز ومباشر بلا مقدمات.\n\n"
     "# قبل كل رد\n"
-    "اسأل نفسك: هل هذه المعلومة مكتوبة حرفياً في «البيانات المتاحة» أدناه؟\n"
-    "إن كان الجواب لا — استخدم أحد الردود الجاهزة أعلاه ولا تجب من عندك.\n\n"
+    "اسأل نفسك: هل هذه المعلومة مكتوبة حرفياً في المقاطع أدناه؟\n"
+    "إن كان الجواب لا — استخدم الرد الجاهز ولا تجب من عندك.\n"
 )
 
+# ------------------------------------------------------------------
+# تحميل الصفوف: كل الصفوف بلا اقتطاع
+# ------------------------------------------------------------------
 
-async def verify_token(x_api_key: str = Header(...)):
-    if x_api_key != API_SECRET_KEY:
-        raise HTTPException(status_code=403, detail="غير مصرح لك بالوصول")
-    return x_api_key
+DIACRITICS = re.compile(r"[ً-ْ]")
+NON_WORD = re.compile(r"[^\w\s]", re.UNICODE)
 
 
-def load_college_data(max_rows: int = 300) -> str:
-    """يفك التشفير في الذاكرة فقط - لا يُكتب أي ملف واضح على القرص."""
-    all_text = ""
+def normalize_ar(text) -> str:
+    """توحيد شكل النص العربي حتى تتطابق الكلمات رغم اختلاف الهمزات والتشكيل."""
+    s = str(text)
+    s = DIACRITICS.sub("", s)
+    s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    s = s.replace("ة", "ه").replace("ى", "ي").replace("ؤ", "و").replace("ئ", "ي")
+    s = NON_WORD.sub(" ", s)
+    return " ".join(s.lower().split())
+
+
+def load_rows() -> list[tuple[str, str]]:
+    """يفك التشفير في الذاكرة ويحوّل كل صف إلى نص قابل للبحث."""
+    rows: list[tuple[str, str]] = []
     for name in ENCRYPTED_FILES:
         path = DATA_DIR / name
         if not path.exists():
@@ -96,33 +105,72 @@ def load_college_data(max_rows: int = 300) -> str:
             continue
         try:
             raw = cipher.decrypt(path.read_bytes())
-            df = pd.read_excel(io.BytesIO(raw)).head(max_rows)
-            label = name.replace(".enc", "")
-            all_text += f"\n--- بيانات ملف: {label} ---\n{df.to_csv(index=False)}\n"
+            df = pd.read_excel(io.BytesIO(raw))
+            label = name.replace(".xlsx.enc", "")
+            for _, r in df.iterrows():
+                parts = [f"{c}: {r[c]}" for c in df.columns if pd.notna(r[c])]
+                if not parts:
+                    continue
+                original = " | ".join(parts)
+                rows.append((normalize_ar(original), f"[{label}] {original}"))
             print("DECRYPTED:", name, "rows:", len(df))
         except InvalidToken:
             print("BAD KEY or corrupt file:", name)
         except Exception as e:
             print("ERROR:", name, type(e).__name__, e)
-    return all_text if all_text else "لا توجد بيانات."
+    return rows
 
 
-context_data = load_college_data()
+ROWS = load_rows()
+print("TOTAL SEARCHABLE ROWS:", len(ROWS))
+
+STOPWORDS = {
+    "من", "ما", "هو", "هي", "في", "على", "عن", "الى", "الي", "هل", "كيف",
+    "وش", "ايش", "متى", "اين", "مين", "كم", "لي", "لك", "انا", "هذا", "هذه",
+    "الذي", "التي", "مع", "او", "و", "ثم", "بس", "يا", "ال",
+    "the", "is", "of", "a", "an", "to", "for", "what", "who", "how", "in",
+}
+
+
+def retrieve(question: str, k: int = 20) -> str:
+    """يبحث في كل الصفوف ويرجع الأكثر صلة بالسؤال فقط."""
+    q_tokens = {
+        t for t in normalize_ar(question).split()
+        if len(t) > 1 and t not in STOPWORDS
+    }
+    if not q_tokens:
+        return ""
+
+    scored = []
+    for norm, original in ROWS:
+        score = sum(1 for t in q_tokens if t in norm)
+        if score:
+            scored.append((score, original))
+
+    if not scored:
+        return ""
+
+    scored.sort(key=lambda x: -x[0])
+    return "\n\n".join(original for _, original in scored[:k])
 
 
 def ask_model(question: str) -> str:
-    """الدالة المشتركة بين واجهة API وبوت تيليجرام."""
+    """يسترجع أولاً؛ وإن لم يجد شيئاً يرفض دون استدعاء النموذج إطلاقاً."""
+    context = retrieve(question)
+    if not context:
+        return NO_DATA_REPLY
+
     response = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
         messages=[
             {
                 "role": "system",
-                "content": SYSTEM_PROMPT_HEAD + f"البيانات المتاحة:\n{context_data}",
+                "content": f"{SYSTEM_PROMPT}\n# المقاطع المسترجعة\n{context}",
             },
             {"role": "user", "content": question},
         ],
         max_tokens=500,
-        temperature=0.2,
+        temperature=0.1,
     )
     return response.choices[0].message.content
 
@@ -131,11 +179,17 @@ class Query(BaseModel):
     question: str
 
 
+async def verify_token(x_api_key: str = Header(...)):
+    if x_api_key != API_SECRET_KEY:
+        raise HTTPException(status_code=403, detail="غير مصرح لك بالوصول")
+    return x_api_key
+
+
 @app.get("/")
 async def root():
     return {
         "status": "ok",
-        "data_loaded": context_data != "لا توجد بيانات.",
+        "rows_indexed": len(ROWS),
         "telegram": bool(TELEGRAM_TOKEN),
     }
 
@@ -154,7 +208,6 @@ async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: str = Header(None),
 ):
-    # تيليجرام يرسل كلمة السر في هذا الهيدر - نرفض أي طلب مزوّر
     if TELEGRAM_SECRET and x_telegram_bot_api_secret_token != TELEGRAM_SECRET:
         raise HTTPException(status_code=403, detail="forbidden")
 
@@ -164,26 +217,42 @@ async def telegram_webhook(
         return {"ok": True}
 
     chat_id = message["chat"]["id"]
-    text = (message.get("text") or "").strip()
-    if not text:
-        return {"ok": True}
-
-    if text.startswith("/start"):
-        answer = "أهلاً بك! اسألني عن مواد ومدرّسي كلية الحاسبات وسأجيبك من البيانات المتاحة."
-    else:
-        try:
-            answer = ask_model(text)
-        except Exception as e:
-            print("TG ERROR:", type(e).__name__, e)
-            answer = "حدث خطأ مؤقت، حاول مرة أخرى."
+    text = (message.get("text") or message.get("caption") or "").strip()
 
     async with httpx.AsyncClient(timeout=30) as http:
+        if not text:
+            await http.post(
+                f"{TG_API}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": "أقرأ النصوص فقط. اكتب سؤالك كتابةً من فضلك.",
+                },
+            )
+            return {"ok": True}
+
+        await http.post(
+            f"{TG_API}/sendChatAction",
+            json={"chat_id": chat_id, "action": "typing"},
+        )
+
+        if text.startswith("/start"):
+            answer = (
+                "أهلاً بك! أنا مساعد إرشادي لطلاب كلية الحاسبات.\n"
+                "اسألني عن المواد وأعضاء هيئة التدريس وتجميعات الطلاب السابقين.\n"
+                "لا أحل الواجبات ولا الاختبارات."
+            )
+        else:
+            try:
+                answer = ask_model(text)
+            except Exception as e:
+                print("TG ERROR:", type(e).__name__, e)
+                answer = "حدث خطأ مؤقت، حاول مرة أخرى."
+
         await http.post(
             f"{TG_API}/sendMessage",
             json={"chat_id": chat_id, "text": answer[:4000]},
         )
 
-    # نرجع 200 دائماً حتى لا يعيد تيليجرام الإرسال بلا نهاية
     return {"ok": True}
 
 
