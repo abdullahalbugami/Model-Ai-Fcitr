@@ -8,6 +8,7 @@ import pandas as pd
 from cryptography.fernet import Fernet, InvalidToken
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -18,28 +19,32 @@ app = FastAPI(title="KAU FCITR Assistant")
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 
-API_SECRET_KEY = os.getenv("MY_API_KEY")
+# يقبل عدة مفاتيح مفصولة بفاصلة
+API_KEYS = {k.strip() for k in os.getenv("MY_API_KEY", "").split(",") if k.strip()}
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 DATA_KEY = os.getenv("DATA_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_SECRET = os.getenv("TELEGRAM_SECRET")
 
-for name, value in [
-    ("MY_API_KEY", API_SECRET_KEY),
-    ("TOGETHER_API_KEY", TOGETHER_API_KEY),
-    ("DATA_KEY", DATA_KEY),
-]:
-    if not value:
-        raise RuntimeError(f"{name} not found in environment")
+if not API_KEYS:
+    raise RuntimeError("MY_API_KEY not found in environment")
+if not TOGETHER_API_KEY:
+    raise RuntimeError("TOGETHER_API_KEY not found in environment")
+if not DATA_KEY:
+    raise RuntimeError("DATA_KEY not found in environment")
+
+# يسمح لأي موقع بالاتصال من المتصفح
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 client = OpenAI(api_key=TOGETHER_API_KEY, base_url="https://api.together.xyz/v1")
 cipher = Fernet(DATA_KEY.encode())
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-ENCRYPTED_FILES = [
-    "KAU_Computer_Courses_QA.xlsx.enc",
-    "whatsapp_chat_dataset_v3.xlsx.enc",
-]
 
 NO_DATA_REPLY = "هذه المعلومة غير متوفرة في بياناتي. راجع الإرشاد الأكاديمي أو مدرّس المادة."
 
@@ -77,10 +82,6 @@ SYSTEM_PROMPT = (
     "إن كان الجواب لا — استخدم الرد الجاهز ولا تجب من عندك.\n"
 )
 
-# ------------------------------------------------------------------
-# تحميل الصفوف: كل الصفوف بلا اقتطاع
-# ------------------------------------------------------------------
-
 DIACRITICS = re.compile(r"[ً-ْ]")
 NON_WORD = re.compile(r"[^\w\s]", re.UNICODE)
 
@@ -96,17 +97,17 @@ def normalize_ar(text) -> str:
 
 
 def load_rows() -> list[tuple[str, str]]:
-    """يفك التشفير في الذاكرة ويحوّل كل صف إلى نص قابل للبحث."""
+    """يفك تشفير كل ملف .enc في data ويحوّل صفوفه إلى نص قابل للبحث."""
     rows: list[tuple[str, str]] = []
-    for name in ENCRYPTED_FILES:
-        path = DATA_DIR / name
-        if not path.exists():
-            print("NOT FOUND:", name)
-            continue
+    for path in sorted(DATA_DIR.glob("*.enc")):
+        name = path.name
         try:
             raw = cipher.decrypt(path.read_bytes())
-            df = pd.read_excel(io.BytesIO(raw))
-            label = name.replace(".xlsx.enc", "")
+            if name.lower().endswith(".csv.enc"):
+                df = pd.read_csv(io.BytesIO(raw))
+            else:
+                df = pd.read_excel(io.BytesIO(raw))
+            label = name.replace(".enc", "")
             for _, r in df.iterrows():
                 parts = [f"{c}: {r[c]}" for c in df.columns if pd.notna(r[c])]
                 if not parts:
@@ -180,7 +181,7 @@ class Query(BaseModel):
 
 
 async def verify_token(x_api_key: str = Header(...)):
-    if x_api_key != API_SECRET_KEY:
+    if x_api_key not in API_KEYS:
         raise HTTPException(status_code=403, detail="غير مصرح لك بالوصول")
     return x_api_key
 
@@ -190,14 +191,18 @@ async def root():
     return {
         "status": "ok",
         "rows_indexed": len(ROWS),
+        "files": [p.name.replace(".enc", "") for p in sorted(DATA_DIR.glob("*.enc"))],
         "telegram": bool(TELEGRAM_TOKEN),
     }
 
 
 @app.post("/chat", dependencies=[Depends(verify_token)])
 async def chat_endpoint(query: Query):
+    question = query.question.strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="السؤال فارغ")
     try:
-        return {"answer": ask_model(query.question)}
+        return {"answer": ask_model(question)}
     except Exception as e:
         print("CHAT ERROR:", type(e).__name__, e)
         raise HTTPException(status_code=500, detail="حدث خطأ في المعالجة")
